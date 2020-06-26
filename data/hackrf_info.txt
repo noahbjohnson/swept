@@ -1,0 +1,8 @@
+hackrf_info version: unknown
+libhackrf version: unknown (0.5)
+Found HackRF
+Index: 0
+Serial number: 0000000000000000b74865dc293338d7
+Board ID Number: 2 (HackRF One)
+Firmware Version: 2018.01.1 (API:1.02)
+Part ID Number: 0xa000cb3c 0x004f4767
