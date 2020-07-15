@@ -3,12 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
-	influxdb2 "github.com/influxdata/influxdb-client-go"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const sweepAlias = "hackrf_sweep"
 
 /*
 Parses a string into an integer representing hertz
@@ -34,52 +35,61 @@ func calculateBinRange(hzLow int, hzHigh int, hzBinWidth int, binNum int) [2]int
 	return [2]int{low, high}
 }
 
-func main() {
-	var client = influxdb2.NewClientWithOptions("http://localhost:8086", "", influxdb2.DefaultOptions().SetLogLevel(3))
-	var writeApi = client.WriteApi("", "rf")
-	errorsCh := writeApi.Errors()
-	go func() {
-		for err := range errorsCh {
-			fmt.Printf("write error: %s\n", err.Error())
-		}
-	}()
-
-	// construct arguments array for the sweep call
+/*
+construct arguments array for the sweep call
+todo: default bin size to 1000000 (1 million hertz)
+*/
+func constructSweepArgs(amplifier bool, oneShot bool, binSize int) []string {
 	var arguments []string
-	// one-shot mode (single sweep)
-	//arguments = append(arguments, "-1")
-	// enable rx amplifier
-	arguments = append(arguments, "-a 1")
+	if amplifier {
+		// enable rx amplifier
+		arguments = append(arguments, "-a 1")
+	}
+	if oneShot {
+		// one-shot mode (single sweep)
+		arguments = append(arguments, "-1")
+	}
 	// bin width in hertz
-	//arguments = append(arguments, fmt.Sprintf("-w %v", 1000000))
+	arguments = append(arguments, fmt.Sprintf("-w %v", binSize))
+	return arguments
+}
 
+/*
+panic if passed an error otherwise just save me from repeating this damn code
+eventually this should probably handle errors...
+*/
+func errPanic(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+/*
+todo: parse args from cli
+*/
+func main() {
 	// call the sweep with arguments
-	cmd := exec.Command("hackrf_sweep", arguments...)
-
 	// create new standard out pipe for the sweep
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		panic(err)
-	}
-
 	// fire off sweep
+	cmd := exec.Command(sweepAlias, constructSweepArgs(true, false, 1000000)...)
+	out, err := cmd.StdoutPipe()
+	errPanic(err)
 	err = cmd.Start()
-	if err != nil {
-		panic(err)
-	}
+	errPanic(err)
 
 	// line parser for the stdout
 	scanner := bufio.NewScanner(out)
 	count := 0
 
 	/*
-		split row into multiple single-bin rows and insert them into influx
+		split row into multiple single-bin rows
 		[date, time, hz_low, hz_high, hz_bin_width, num_samples, bin1dB, bin2dB, bin3dB...]
 		bin1 frequency range = (hz_low) > x < (hz_low + hz_bin_width)
 		bin2 frequency range = (hz_low + hz_bin_width) > x < (hz_low + hz_bin_width * 2)
 		etc...
 	*/
 	for scanner.Scan() {
+		// Parse row
 		rowString := scanner.Text()
 		var row = strings.Split(rowString, ", ")
 		var numBins = len(row) - 6
@@ -88,31 +98,19 @@ func main() {
 		var hzHigh = frequencyStringToInt(row[3])
 		var hzBinWidth = frequencyStringToInt(row[4])
 		var samples = frequencyStringToInt(row[5])
+
+		// break row into bins
 		for i := 0; i < numBins; i++ {
 			var binRange = calculateBinRange(hzLow, hzHigh, hzBinWidth, i)
 			var binRowIndex = i + 6
-			var db float64
+			var decibels float64
 			var datetime time.Time
 			var err error
 			datetime, err = time.Parse(time.RFC3339, row[0]+"T"+row[1]+"Z")
-			if err != nil {
-				panic(err)
-			}
-			db, err = strconv.ParseFloat(row[binRowIndex], 64)
-			if err != nil {
-				panic(err)
-			}
-			p := influxdb2.NewPoint("rfdb",
-				map[string]string{"hzLow": strconv.Itoa(binRange[0]),
-					"hzHigh": strconv.Itoa(binRange[1])},
-				map[string]interface{}{
-					"samples": samples / numBins,
-					"db":      db},
-				datetime)
-			writeApi.WritePoint(p)
-			//fmt.Println(count)
+			errPanic(err)
+			decibels, err = strconv.ParseFloat(row[binRowIndex], 64)
+			errPanic(err)
+			// todo: write row here
 		}
 	}
-	writeApi.Flush()
-	client.Close()
 }
