@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -39,12 +40,14 @@ func calculateBinRange(hzLow int, hzHigh int, hzBinWidth int, binNum int) [2]int
 construct arguments array for the sweep call
 todo: default bin size to 1000000 (1 million hertz)
 */
-func constructSweepArgs(amplifier bool, oneShot bool, binSize int) []string {
+func constructSweepArgs(oneShot bool, binSize int) []string {
 	var arguments []string
-	if amplifier {
-		// enable rx amplifier
-		arguments = append(arguments, "-a 1")
-	}
+	//if amplifier {
+	// enable rx amplifier
+	// LEAVE AMP OFF so you don't blow your board near a cell tower
+	// only engage it if you're in the boonies
+	//arguments = append(arguments, "-a 1")
+	//}
 	if oneShot {
 		// one-shot mode (single sweep)
 		arguments = append(arguments, "-1")
@@ -71,7 +74,7 @@ func main() {
 	// call the sweep with arguments
 	// create new standard out pipe for the sweep
 	// fire off sweep
-	cmd := exec.Command(sweepAlias, constructSweepArgs(true, false, 1000000)...)
+	cmd := exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
 	out, err := cmd.StdoutPipe()
 	errPanic(err)
 	err = cmd.Start()
@@ -80,6 +83,14 @@ func main() {
 	// line parser for the stdout
 	scanner := bufio.NewScanner(out)
 	count := 0
+
+	outFile, err := os.Create("out.txt")
+	errPanic(err)
+	defer outFile.Close()
+
+	var lastLap time.Time
+	firstLap := true
+	var laps []float64
 
 	/*
 		split row into multiple single-bin rows
@@ -93,12 +104,37 @@ func main() {
 		rowString := scanner.Text()
 		var row = strings.Split(rowString, ", ")
 		var numBins = len(row) - 6
-		count = count + numBins
 		var hzLow = frequencyStringToInt(row[2])
+		if hzLow == 0 {
+			if firstLap {
+				firstLap = false
+				lastLap = time.Now()
+			} else {
+				laps = append(laps, float64(time.Now().Sub(lastLap).Milliseconds()))
+				lastLap = time.Now()
+				go func() {
+					if len(laps)%10 == 0 {
+						var max = laps[0]
+						var min = laps[0]
+						var sum float64 = 0
+						for i := 0; i < len(laps); i++ {
+							if laps[i] > max {
+								max = laps[i]
+							} else if laps[i] < min {
+								min = laps[i]
+							}
+							sum = sum + laps[i]
+						}
+						fmt.Printf("max: %g min: %g average: %g", max/1000, min/1000, (sum/float64(len(laps)))/1000)
+						fmt.Println()
+					}
+				}()
+			}
+		}
 		var hzHigh = frequencyStringToInt(row[3])
 		var hzBinWidth = frequencyStringToInt(row[4])
 		var samples = frequencyStringToInt(row[5])
-
+		count = count + numBins
 		// break row into bins
 		for i := 0; i < numBins; i++ {
 			var binRange = calculateBinRange(hzLow, hzHigh, hzBinWidth, i)
@@ -111,6 +147,10 @@ func main() {
 			decibels, err = strconv.ParseFloat(row[binRowIndex], 64)
 			errPanic(err)
 			// todo: write row here
+			insertRow := []string{strconv.Itoa(binRange[0]), strconv.Itoa(binRange[1]), strconv.FormatFloat(decibels, 'f', -1, 64), strconv.Itoa(samples), datetime.String()}
+			_, _ = outFile.Write([]byte(strings.Join(insertRow, ",")))
+			outFile.Write([]byte("\n"))
 		}
 	}
+
 }
