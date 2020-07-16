@@ -39,12 +39,6 @@ todo: default bin size to 1000000 (1 million hertz)
 */
 func constructSweepArgs(oneShot bool, binSize int) []string {
 	var arguments []string
-	//if amplifier {
-	// enable rx amplifier
-	// LEAVE AMP OFF so you don't blow your board near a cell tower
-	// only engage it if you're in the boonies
-	//arguments = append(arguments, "-a 1")
-	//}
 	if oneShot {
 		// one-shot mode (single sweep)
 		arguments = append(arguments, "-1")
