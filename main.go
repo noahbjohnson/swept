@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+	"xorm.io/xorm"
 )
 
 const sweepAlias = "hackrf_sweep"
@@ -104,6 +106,25 @@ func parseRow(rows []Row, rowString string) []Row {
 	return rows
 }
 
+func setupEngine() (engine *xorm.Engine) {
+	engine, err := xorm.NewEngine("sqlite3", "./test.db")
+	errPanic(err)
+	return
+}
+
+func setupCommand() (cmd *exec.Cmd, out io.ReadCloser, scanner *bufio.Scanner) {
+	var err error
+	cmd = exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
+	out, err = cmd.StdoutPipe()
+	errPanic(err)
+	scanner = bufio.NewScanner(out)
+	return
+}
+
+func cleanupMain(out io.ReadCloser) {
+	_ = out.Close()
+}
+
 func main() {
 	var (
 		laps float64
@@ -111,19 +132,10 @@ func main() {
 		err  error
 	)
 
-	// Setup Command
-	cmd := exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
-	out, err := cmd.StdoutPipe()
-	errPanic(err)
+	cmd, out, scanner := setupCommand()
 
-	defer func() {
-		_ = out.Close()
-	}()
+	defer cleanupMain(out)
 
-	//engine, err := xorm.NewEngine("sqlite3", "./test.db")
-	//errPanic(err)
-
-	scanner := bufio.NewScanner(out)
 	err = cmd.Start()
 	errPanic(err)
 
