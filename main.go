@@ -54,11 +54,14 @@ func errPanic(err error) {
 func scanRow(scanner *bufio.Scanner) (rows [][]string, runtime time.Duration) {
 	// Timer
 	start := time.Now()
-
+	defer func() { runtime = time.Since(start) }()
+	var rowString string
 	scanner.Scan()
-	rowString := scanner.Text()
+	rowString = scanner.Text()
+	if len(rowString) < 1 {
+		return
+	}
 	rows = parseRow(rows, rowString)
-	runtime = time.Since(start)
 	return
 }
 
@@ -92,7 +95,7 @@ func parseRow(rows [][]string, rowString string) [][]string {
 func main() {
 	var laps []float64
 	// Setup Command
-	cmd := exec.Command(sweepAlias, constructSweepArgs(true, 1000000)...)
+	cmd := exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
 	out, err := cmd.StdoutPipe()
 	errPanic(err)
 	err = cmd.Start()
