@@ -93,10 +93,14 @@ func parseRow(rows [][]string, rowString string) [][]string {
 }
 
 func main() {
-	var laps []float64
+	var laps float64
 	// Setup Command
 	cmd := exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
 	out, err := cmd.StdoutPipe()
+	defer func() {
+		err = out.Close()
+		errPanic(err)
+	}()
 	errPanic(err)
 	err = cmd.Start()
 	errPanic(err)
@@ -105,27 +109,20 @@ func main() {
 	var rows [][]string
 	for i := 0; i < 10000; i++ {
 		newRows, duration := scanRow(scanner)
-		laps = append(laps, float64(duration.Milliseconds()))
+		if len(newRows) < 1 {
+			break
+		}
+		laps = laps + float64(duration.Milliseconds())
 		rows = append(rows, newRows...)
-		logLaps(laps)
+		if len(rows)%10000 == 0 {
+			go logLaps(laps, len(rows))
+		}
 	}
+	logLaps(laps, len(rows))
 	println(len(rows))
 }
 
-func logLaps(laps []float64) {
-	if len(laps)%10 == 0 {
-		var max = laps[0]
-		var min = laps[0]
-		var sum float64 = 0
-		for i := 0; i < len(laps); i++ {
-			if laps[i] > max {
-				max = laps[i]
-			} else if laps[i] < min {
-				min = laps[i]
-			}
-			sum = sum + laps[i]
-		}
-		fmt.Printf("max: %g min: %g average: %g", max/1000, min/1000, (sum/float64(len(laps)))/1000)
-		fmt.Println()
-	}
+func logLaps(milliseconds float64, rows int) {
+	fmt.Printf("%d samples processed in %g seconds", rows, milliseconds/1000)
+	fmt.Println()
 }
