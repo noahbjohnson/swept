@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
-	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -54,7 +53,7 @@ func errPanic(err error) {
 	}
 }
 
-func scanRow(scanner *bufio.Scanner) (rows []Row, runtime time.Duration) {
+func scanRow(scanner *bufio.Scanner) (rows []Sample, runtime time.Duration) {
 	// Timer
 	start := time.Now()
 	defer func() { runtime = time.Since(start) }()
@@ -68,18 +67,18 @@ func scanRow(scanner *bufio.Scanner) (rows []Row, runtime time.Duration) {
 	return
 }
 
-type Row struct {
+type Sample struct {
 	Id        int64 `xorm:"pk autoincr"`
 	HzLow     int   `xorm:"index"`
 	HzHigh    int   `xorm:"index"`
 	Decibels  float64
 	N         int
-	Timestamp time.Time
+	Timestamp time.Time `xorm:"index"`
 }
 
 // Break one row with multiple bin values into multiple rows with one bin each
 // Append extracted rows to row array
-func parseRow(rows []Row, rowString string) []Row {
+func parseRow(rows []Sample, rowString string) []Sample {
 	var row = strings.Split(rowString, ", ")
 	var numBins = len(row) - 6
 	var samples = frequencyStringToInt(row[5])
@@ -94,7 +93,7 @@ func parseRow(rows []Row, rowString string) []Row {
 		errPanic(err)
 		decibels, err := strconv.ParseFloat(row[binRowIndex], 64)
 		errPanic(err)
-		insertRow := Row{
+		insertRow := Sample{
 			HzLow:     low,
 			HzHigh:    high,
 			Decibels:  decibels,
@@ -112,29 +111,36 @@ func setupEngine() (engine *xorm.Engine) {
 	return
 }
 
-func setupCommand() (cmd *exec.Cmd, out io.ReadCloser, scanner *bufio.Scanner) {
-	var err error
+func setupCommand() (cmd *exec.Cmd, scanner *bufio.Scanner) {
 	cmd = exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
-	out, err = cmd.StdoutPipe()
+	out, err := cmd.StdoutPipe()
 	errPanic(err)
 	scanner = bufio.NewScanner(out)
 	return
 }
 
-func cleanupMain(out io.ReadCloser) {
-	_ = out.Close()
+func insertRows(engine *xorm.Engine, rows []Sample) {
+	sess := engine.NewSession()
+	defer sess.Close()
+	_, err := sess.Insert(rows)
+	errPanic(err)
+	_ = sess.Commit()
 }
 
 func main() {
 	var (
-		laps float64
-		rows []Row
-		err  error
+		laps    float64
+		rows    []Sample
+		err     error
+		cmd     *exec.Cmd
+		scanner *bufio.Scanner
 	)
 
-	cmd, out, scanner := setupCommand()
+	cmd, scanner = setupCommand()
 
-	defer cleanupMain(out)
+	engine := setupEngine()
+	err = engine.Sync2(new(Sample))
+	errPanic(err)
 
 	err = cmd.Start()
 	errPanic(err)
@@ -146,6 +152,7 @@ func main() {
 		}
 		laps = laps + float64(duration.Milliseconds())
 		rows = append(rows, newRows...)
+		insertRows(engine, newRows)
 		if len(rows)%10000 == 0 {
 			go logLaps(laps, len(rows))
 		}
