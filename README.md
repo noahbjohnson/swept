@@ -1,6 +1,11 @@
 # swept
 Hackrf sweep stream processing
 
+## Overview
+
+This project's goal is to create a high-performance rf mapper based off gpsd and the hackrf platform.
+This repo is unstable.
+
 ## Getting Started
 
 - [Install golang](https://golang.org/doc/install)
