@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/noahbjohnson/go-gpsd"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 
 const sweepAlias = "hackrf_sweep"
 
-// Parses a string into an integer representing hertz
+// frequencyStringToInt parses a string into an integer representing hertz
 func frequencyStringToInt(x string) (num int) {
 	var err error
 	num, err = strconv.Atoi(strings.Split(x, ".")[0])
@@ -21,7 +22,7 @@ func frequencyStringToInt(x string) (num int) {
 	return
 }
 
-// Calculates the highest and lowest frequencies in a bin
+// calculateBinRange calculates the highest and lowest frequencies in a bin
 func calculateBinRange(hzLow int, hzHigh int, hzBinWidth int, binNum int) (low, high int) {
 	low = hzLow + (binNum * hzBinWidth)
 	high = low + hzBinWidth
@@ -31,7 +32,7 @@ func calculateBinRange(hzLow int, hzHigh int, hzBinWidth int, binNum int) (low, 
 	return
 }
 
-// construct arguments array for the scanRow call
+// constructSweepArgs constructs arguments array for the scanRow call
 // todo: default bin size to 1000000 (1 million hertz)
 // todo: high and low limits
 // todo: sample rate
@@ -45,41 +46,19 @@ func constructSweepArgs(oneShot bool, binSize int) (arguments []string) {
 	return
 }
 
-// panic if passed an error otherwise just save me from repeating this damn code
-// eventually this should probably handle errors...
+// errPanic panics if passed an error otherwise just save me from repeating this damn code
+// todo: eventually this should probably handle errors...
 func errPanic(err error) {
 	if err != nil {
 		panic(err)
 	}
 }
 
-func scanRow(scanner *bufio.Scanner) (rows []Sample, runtime time.Duration) {
-	// Timer
-	start := time.Now()
-	defer func() { runtime = time.Since(start) }()
-	var rowString string
-	scanner.Scan()
-	rowString = scanner.Text()
-	if len(rowString) < 1 {
-		return
-	}
-	rows = parseRow(rows, rowString)
-	return
-}
-
-type Sample struct {
-	Id        int64 `xorm:"pk autoincr"`
-	HzLow     int   `xorm:"index"`
-	HzHigh    int   `xorm:"index"`
-	Decibels  float64
-	N         int
-	Timestamp time.Time `xorm:"index"`
-}
-
-// Break one row with multiple bin values into multiple rows with one bin each
+// scanRow scans a row from the provided scanner and parses it
+// breaks one row with multiple bin values into multiple rows with one bin each
 // Append extracted rows to row array
-func parseRow(rows []Sample, rowString string) []Sample {
-	var row = strings.Split(rowString, ", ")
+func scanRow(scanner *bufio.Scanner, lat float64, lon float64, alt float64) (rows []Sample) {
+	var row = strings.Split(scanner.Text(), ", ")
 	var numBins = len(row) - 6
 	var samples = frequencyStringToInt(row[5])
 	for i := 0; i < numBins; i++ {
@@ -94,23 +73,42 @@ func parseRow(rows []Sample, rowString string) []Sample {
 		decibels, err := strconv.ParseFloat(row[binRowIndex], 64)
 		errPanic(err)
 		insertRow := Sample{
-			HzLow:     low,
-			HzHigh:    high,
-			Decibels:  decibels,
-			N:         samples,
-			Timestamp: parsedTime,
+			HzLow:          low,
+			HzHigh:         high,
+			Decibels:       decibels,
+			N:              samples,
+			Timestamp:      parsedTime,
+			AltitudeMeters: alt,
+			Latitude:       lat,
+			Longitude:      lon,
 		}
 		rows = append(rows, insertRow)
 	}
 	return rows
 }
 
+type Sample struct {
+	Id             int64 `xorm:"pk autoincr"`
+	HzLow          int   `xorm:"index"`
+	HzHigh         int   `xorm:"index"`
+	Decibels       float64
+	Latitude       float64 `xorm:"index"`
+	Longitude      float64 `xorm:"index"`
+	AltitudeMeters float64
+	N              int
+	Timestamp      time.Time `xorm:"index"`
+}
+
+// setupEngine creates a new orm engine and syncs the tables
 func setupEngine() (engine *xorm.Engine) {
 	engine, err := xorm.NewEngine("sqlite3", "./test.db")
+	errPanic(err)
+	err = engine.Sync2(new(Sample)) // Set up db tables
 	errPanic(err)
 	return
 }
 
+// setupCommand creates a hackrf_sweep command and the stdout scanner
 func setupCommand() (cmd *exec.Cmd, scanner *bufio.Scanner) {
 	cmd = exec.Command(sweepAlias, constructSweepArgs(false, 1000000)...)
 	out, err := cmd.StdoutPipe()
@@ -119,49 +117,68 @@ func setupCommand() (cmd *exec.Cmd, scanner *bufio.Scanner) {
 	return
 }
 
-func insertRows(engine *xorm.Engine, rows []Sample) {
+// insertSampleRows inserts rows of samples in a transaction
+func insertSampleRows(engine *xorm.Engine, rows []Sample) {
 	sess := engine.NewSession()
 	defer sess.Close()
 	_, err := sess.Insert(rows)
 	errPanic(err)
-	_ = sess.Commit()
+	err = sess.Commit()
+	errPanic(err)
 }
 
+// todo: check that there is a hackrf plugged in
+// todo: wait for gpsd tpv
+// todo: use buffer channels like an adult
 func main() {
 	var (
-		laps    float64
-		rows    []Sample
-		err     error
-		cmd     *exec.Cmd
-		scanner *bufio.Scanner
+		err      error
+		rows     int
+		start    = time.Now()
+		laps     int // the lap number starting when updated
+		lapLimit = 10
+		lat      = new(float64)
+		lon      = new(float64)
+		alt      = new(float64)
 	)
 
-	cmd, scanner = setupCommand()
-
+	// Set up command and db engine
+	cmd, scanner := setupCommand()
 	engine := setupEngine()
-	err = engine.Sync2(new(Sample))
+
+	gps, err := gpsd.Dial(gpsd.DefaultAddress)
+	errPanic(err)
+	gps.Subscribe("TPV", func(r interface{}) {
+		tpv := r.(*gpsd.TPVReport)
+		lat = &tpv.Lat
+		lon = &tpv.Lon
+		alt = &tpv.Alt
+	})
+
+	err = cmd.Start() // Start (async) command
 	errPanic(err)
 
-	err = cmd.Start()
-	errPanic(err)
+	gps.Run()
+	defer gps.Close()
 
-	for i := 0; i < 100000000; i++ {
-		newRows, duration := scanRow(scanner)
-		if len(newRows) < 1 {
-			break
+	for scanner.Scan() {
+		newRows := scanRow(scanner, *lat, *lon, *alt)
+		insertSampleRows(engine, newRows)
+
+		if newRows[0].HzLow == 0 { // todo: update 0 to lower limit when implemented
+			laps = laps + 1
+			if laps > 1 {
+				go logLaps(time.Since(start).Milliseconds(), rows, *lat, *lon)
+			}
+			if laps > lapLimit {
+				break
+			}
 		}
-		laps = laps + float64(duration.Milliseconds())
-		rows = append(rows, newRows...)
-		insertRows(engine, newRows)
-		if len(rows)%10000 == 0 {
-			go logLaps(laps, len(rows))
-		}
+
+		rows = rows + len(newRows)
 	}
-	logLaps(laps, len(rows))
-	println(len(rows))
 }
 
-func logLaps(milliseconds float64, rows int) {
-	fmt.Printf("%d samples processed in %g seconds", rows, milliseconds/1000)
-	fmt.Println()
+func logLaps(milliseconds int64, rows int, lat float64, lon float64) {
+	fmt.Println(fmt.Sprintf("%d samples processed in %g seconds. current location: %f,%f", rows, float64(milliseconds)/1000, lat, lon))
 }
