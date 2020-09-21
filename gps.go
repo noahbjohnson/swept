@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/adrianmo/go-nmea"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.bug.st/serial"
@@ -9,13 +10,32 @@ import (
 	"strings"
 )
 
-func GetPortString() (string, error) {
+type Command uint8
+
+type CommandChannel chan Command
+type StringChannel chan string
+
+const (
+	Kill Command = iota
+)
+
+type GpsController struct {
+	port             serial.Port
+	portName         string
+	stringChannel    StringChannel
+	lineChannel      StringChannel
+	cleanLineChannel StringChannel
+	controlChannel   CommandChannel
+	// todo reader status?
+}
+
+func (s *GpsController) GetPortString() error {
 	ports, err := serial.GetPortsList()
 	if err != nil {
-		return "", err
+		return err
 	}
 	if len(ports) == 0 {
-		return "", fmt.Errorf("no serial ports found")
+		return fmt.Errorf("no serial ports found")
 	}
 	var portNames []string
 	for _, port := range ports {
@@ -24,55 +44,137 @@ func GetPortString() (string, error) {
 		}
 	}
 	if len(portNames) == 0 {
-		return "", fmt.Errorf("no serial ports found")
+		return fmt.Errorf("no serial ports found")
 	}
 	sort.Strings(portNames)
-	portName := portNames[0]
-	return portName, err
+	s.portName = portNames[0]
+	log.Info().Str("port", s.portName).Msg("Port found")
+	return err
+}
+
+func (s *GpsController) OpenPort() error {
+	if s.portName == "" {
+		return fmt.Errorf("no port was identified. run GetPortString first")
+	}
+	mode := &serial.Mode{
+		BaudRate: 4800,
+	}
+	reader, err := serial.Open(s.portName, mode)
+	if err != nil {
+		return fmt.Errorf("failed to open serial port")
+	}
+	s.port = reader
+	log.Info().Str("port", s.portName).Msg("Port opened")
+	return nil
+}
+
+func (s *GpsController) createChannels() {
+	if s.stringChannel == nil {
+		s.stringChannel = make(StringChannel, 1024)
+	}
+	if s.lineChannel == nil {
+		s.lineChannel = make(StringChannel, 1024)
+	}
+	if s.cleanLineChannel == nil {
+		s.cleanLineChannel = make(StringChannel, 1024)
+	}
+	if s.controlChannel == nil {
+		s.controlChannel = make(CommandChannel, 10)
+	}
+}
+
+func (s *GpsController) Read() {
+	s.createChannels()
+
+	// read the serial bytes into a string channel
+	s.read()
+
+	// break up the strings into lines in the line channel
+	s.parseLines()
+
+	// clean lines of trailing spaces and invalid characters
+	s.cleanLines()
+
+	for v := range s.cleanLineChannel {
+		sentence, err := nmea.Parse(v)
+		if err != nil {
+			log.Error().Err(err).Str("line", v).Send()
+		}
+		log.Debug().Msg(sentence.String())
+	}
+
+}
+
+func (s *GpsController) read() {
+	go func() {
+		readerBuff := make([]byte, 2048)
+		for {
+			// todo check control channel
+			n, err := s.port.Read(readerBuff)
+			if err != nil {
+				log.Fatal().Err(err).Msg("serial read failed")
+				break
+			}
+			if n == 0 {
+				log.Info().Msg("serial read ended")
+				break
+			}
+			s.stringChannel <- string(readerBuff[:n])
+		}
+	}()
+}
+
+func (s *GpsController) parseLines() {
+	go func() {
+		stringBuff := make([]string, 1024)
+		firstLine := true
+
+		for v := range s.stringChannel {
+			if strings.Contains(v, "\n") {
+				split := strings.Split(v, "\n")
+				stringBuff = append(stringBuff, split[0])
+				if !firstLine {
+					s.lineChannel <- strings.Join(stringBuff, "")
+				} else {
+					firstLine = false
+				}
+				for _, i := range split[1 : len(split)-1] {
+					s.lineChannel <- i
+				}
+				stringBuff = make([]string, 1024)
+				stringBuff = append(stringBuff, split[len(split)-1])
+			}
+			stringBuff = append(stringBuff, v)
+		}
+
+	}()
+}
+
+func (s GpsController) cleanLines() {
+	go func() {
+		for line := range s.lineChannel {
+			s.cleanLineChannel <- strings.TrimSpace(line)
+		}
+	}()
+}
+
+func (s GpsController) Stop() {
+	// todo
 }
 
 func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	ports, err := serial.GetPortsList()
+	controller := GpsController{}
+
+	err := controller.GetPortString()
 	if err != nil {
 		log.Fatal().Err(err).Send()
 	}
-	if len(ports) == 0 {
-		log.Fatal().Msg("No serial ports found!")
-	}
-	for _, port := range ports {
-		fmt.Printf("Found port: %v\n", port)
-	}
-	portName, err := GetPortString()
+
+	err = controller.OpenPort()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to get serial port")
+		log.Fatal().Err(err).Send()
 	}
-	log.Info().Str("port", portName).Msg("usb device found")
-	mode := &serial.Mode{
-		BaudRate: 4800,
-	}
-	reader, err := serial.Open(portName, mode)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to open serial port")
-	}
-	log.Info().Str("port", portName).Msg("Opened serial connection")
-	buff := make(chan string, 1000)
-	go func() {
-		readerBuff := make([]byte, 100)
-		for {
-			n, err := reader.Read(readerBuff)
-			if err != nil {
-				log.Fatal().Err(err).Msg("buffered read failed")
-				break
-			}
-			if n == 0 {
-				fmt.Println("\nEOF")
-				break
-			}
-			buff <- string(readerBuff[:n])
-		}
-	}()
-	for v := range buff {
-		fmt.Print(v)
-	}
+
+	controller.Read()
 }
