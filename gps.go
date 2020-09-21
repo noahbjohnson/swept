@@ -12,6 +12,7 @@ import (
 
 type StringChannel chan string
 type SentenceChannel chan nmea.Sentence
+type BooleanChannel chan bool
 
 type GpsController struct {
 	port             serial.Port
@@ -61,21 +62,6 @@ func (s *GpsController) OpenPort() error {
 	return nil
 }
 
-func (s *GpsController) createChannels() {
-	if s.stringChannel == nil {
-		s.stringChannel = make(StringChannel, 1024)
-	}
-	if s.lineChannel == nil {
-		s.lineChannel = make(StringChannel, 100)
-	}
-	if s.cleanLineChannel == nil {
-		s.cleanLineChannel = make(StringChannel, 100)
-	}
-	if s.sentenceChannel == nil {
-		s.sentenceChannel = make(SentenceChannel, 100)
-	}
-}
-
 func (s *GpsController) Read() {
 	// Init channels and buffers
 	s.createChannels()
@@ -91,28 +77,36 @@ func (s *GpsController) Read() {
 
 	// parse the lines into NMEA sentences
 	s.parseLines()
+
+	for v := range s.sentenceChannel {
+		log.Printf("%#v", v)
+	}
+
+	log.Info().Msg("gps read done")
 }
 
-func (s *GpsController) parseLines() {
-	go func() {
-		for v := range s.cleanLineChannel {
-			sentence, err := nmea.Parse(v)
-			if err != nil {
-				log.Error().Err(err).Str("line", v).Send()
-			}
-			s.sentenceChannel <- sentence
-		}
-	}()
+func (s *GpsController) createChannels() {
+	if s.stringChannel == nil {
+		s.stringChannel = make(StringChannel, 1024)
+	}
+	if s.lineChannel == nil {
+		s.lineChannel = make(StringChannel, 100)
+	}
+	if s.cleanLineChannel == nil {
+		s.cleanLineChannel = make(StringChannel, 100)
+	}
+	if s.sentenceChannel == nil {
+		s.sentenceChannel = make(SentenceChannel, 100)
+	}
 }
 
 func (s *GpsController) read() {
 	go func() {
 		readerBuff := make([]byte, 2048)
 		for {
-			// todo check control channel
 			n, err := s.port.Read(readerBuff)
 			if err != nil {
-				log.Fatal().Err(err).Msg("serial read failed")
+				log.Error().Err(err).Msg("device removed or serial read failed")
 				break
 			}
 			if n == 0 {
@@ -121,6 +115,8 @@ func (s *GpsController) read() {
 			}
 			s.stringChannel <- string(readerBuff[:n])
 		}
+		log.Debug().Msg("ending serial reader")
+		close(s.stringChannel) // start the closing domino chain
 	}()
 }
 
@@ -146,6 +142,7 @@ func (s *GpsController) splitLines() {
 			}
 			stringBuff = append(stringBuff, v)
 		}
+		close(s.lineChannel)
 	}()
 }
 
@@ -154,11 +151,21 @@ func (s GpsController) cleanLines() {
 		for line := range s.lineChannel {
 			s.cleanLineChannel <- strings.TrimSpace(line)
 		}
+		close(s.cleanLineChannel)
 	}()
 }
 
-func (s GpsController) Stop() {
-	// todo
+func (s *GpsController) parseLines() {
+	go func() {
+		for v := range s.cleanLineChannel {
+			sentence, err := nmea.Parse(v)
+			if err != nil {
+				log.Error().Err(err).Str("line", v).Send()
+			}
+			s.sentenceChannel <- sentence
+		}
+		close(s.sentenceChannel)
+	}()
 }
 
 func main() {
