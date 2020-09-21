@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/noahbjohnson/go-gpsd"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -118,14 +117,14 @@ func setupCommand() (cmd *exec.Cmd, scanner *bufio.Scanner) {
 }
 
 // insertSampleRows inserts rows of samples in a transaction
-func insertSampleRows(engine *xorm.Engine, rows []Sample) {
-	sess := engine.NewSession()
-	defer sess.Close()
-	_, err := sess.Insert(rows)
-	errPanic(err)
-	err = sess.Commit()
-	errPanic(err)
-}
+//func insertSampleRows(engine *xorm.Engine, rows []Sample) {
+//sess := engine.NewSession()
+//defer sess.Close()
+//_, err := sess.Insert(rows)
+//errPanic(err)
+//err = sess.Commit()
+//errPanic(err)
+//}
 
 // todo: check that there is a hackrf plugged in
 // todo: wait for gpsd tpv
@@ -144,26 +143,26 @@ func main() {
 
 	// Set up command and db engine
 	cmd, scanner := setupCommand()
-	engine := setupEngine()
+	//engine := setupEngine()
 
-	gps, err := gpsd.Dial(gpsd.DefaultAddress)
-	errPanic(err)
-	gps.Subscribe("TPV", func(r interface{}) {
-		tpv := r.(*gpsd.TPVReport)
-		lat = &tpv.Lat
-		lon = &tpv.Lon
-		alt = &tpv.Alt
-	})
+	//gps, err := gpsd.Dial(gpsd.DefaultAddress)
+	//errPanic(err)
+	//gps.Subscribe("TPV", func(r interface{}) {
+	//	tpv := r.(*gpsd.TPVReport)
+	//	lat = &tpv.Lat
+	//	lon = &tpv.Lon
+	//	alt = &tpv.Alt
+	//})
 
 	err = cmd.Start() // Start (async) command
 	errPanic(err)
-
-	gps.Run()
-	defer gps.Close()
+	//
+	//gps.Run()
+	//defer gps.Close()
 
 	for scanner.Scan() {
 		newRows := scanRow(scanner, *lat, *lon, *alt)
-		insertSampleRows(engine, newRows)
+		//insertSampleRows(engine, newRows)
 
 		if newRows[0].HzLow == 0 { // todo: update 0 to lower limit when implemented
 			laps = laps + 1
