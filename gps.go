@@ -10,14 +10,8 @@ import (
 	"strings"
 )
 
-type Command uint8
-
-type CommandChannel chan Command
 type StringChannel chan string
-
-const (
-	Kill Command = iota
-)
+type SentenceChannel chan nmea.Sentence
 
 type GpsController struct {
 	port             serial.Port
@@ -25,8 +19,7 @@ type GpsController struct {
 	stringChannel    StringChannel
 	lineChannel      StringChannel
 	cleanLineChannel StringChannel
-	controlChannel   CommandChannel
-	// todo reader status?
+	sentenceChannel  SentenceChannel
 }
 
 func (s *GpsController) GetPortString() error {
@@ -73,36 +66,43 @@ func (s *GpsController) createChannels() {
 		s.stringChannel = make(StringChannel, 1024)
 	}
 	if s.lineChannel == nil {
-		s.lineChannel = make(StringChannel, 1024)
+		s.lineChannel = make(StringChannel, 100)
 	}
 	if s.cleanLineChannel == nil {
-		s.cleanLineChannel = make(StringChannel, 1024)
+		s.cleanLineChannel = make(StringChannel, 100)
 	}
-	if s.controlChannel == nil {
-		s.controlChannel = make(CommandChannel, 10)
+	if s.sentenceChannel == nil {
+		s.sentenceChannel = make(SentenceChannel, 100)
 	}
 }
 
 func (s *GpsController) Read() {
+	// Init channels and buffers
 	s.createChannels()
 
 	// read the serial bytes into a string channel
 	s.read()
 
 	// break up the strings into lines in the line channel
-	s.parseLines()
+	s.splitLines()
 
 	// clean lines of trailing spaces and invalid characters
 	s.cleanLines()
 
-	for v := range s.cleanLineChannel {
-		sentence, err := nmea.Parse(v)
-		if err != nil {
-			log.Error().Err(err).Str("line", v).Send()
-		}
-		log.Debug().Msg(sentence.String())
-	}
+	// parse the lines into NMEA sentences
+	s.parseLines()
+}
 
+func (s *GpsController) parseLines() {
+	go func() {
+		for v := range s.cleanLineChannel {
+			sentence, err := nmea.Parse(v)
+			if err != nil {
+				log.Error().Err(err).Str("line", v).Send()
+			}
+			s.sentenceChannel <- sentence
+		}
+	}()
 }
 
 func (s *GpsController) read() {
@@ -124,11 +124,11 @@ func (s *GpsController) read() {
 	}()
 }
 
-func (s *GpsController) parseLines() {
+func (s *GpsController) splitLines() {
 	go func() {
 		stringBuff := make([]string, 1024)
+		// skip the first line since it's likely partial
 		firstLine := true
-
 		for v := range s.stringChannel {
 			if strings.Contains(v, "\n") {
 				split := strings.Split(v, "\n")
@@ -146,7 +146,6 @@ func (s *GpsController) parseLines() {
 			}
 			stringBuff = append(stringBuff, v)
 		}
-
 	}()
 }
 
